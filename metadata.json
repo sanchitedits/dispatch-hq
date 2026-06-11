@@ -1,0 +1,6 @@
+{
+  "name": "Dispatch",
+  "description": "B2B Shopify App for Digital Product Delivery & Asset Protection",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

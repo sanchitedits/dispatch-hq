@@ -1,0 +1,96 @@
+service: dispatch-hq
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  architecture: arm64
+  httpApi:
+    cors: true
+  environment:
+    DYNAMODB_TABLE: !Ref DispatchTable
+    WEBHOOK_QUEUE: !Ref WebhookQueue
+    SHOPIFY_WEBHOOK_SECRET: ${env:SHOPIFY_WEBHOOK_SECRET}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+      Resource: !GetAtt DispatchTable.Arn
+    - Effect: Allow
+      Action:
+        - sqs:SendMessage
+      Resource: !GetAtt WebhookQueue.Arn
+
+functions:
+  # 1. API Endpoints for Dashboard (Fetching Products, Logs)
+  api:
+    handler: dist/aws/api.handler
+    events:
+      - httpApi:
+          path: /api/products
+          method: get
+      - httpApi:
+          path: /api/logs
+          method: get
+
+  # 2. Fast Ingestion for Webhooks (Validates HMAC -> pushes to SQS)
+  webhookIngest:
+    handler: dist/aws/webhookIngest.handler
+    events:
+      - httpApi:
+          path: /api/webhooks/orders
+          method: post
+
+  # 3. Background Processor (Reads from SQS -> Dispatches Keys/Digital Links)
+  webhookWorker:
+    handler: dist/aws/webhookWorker.handler
+    events:
+      - sqs:
+          arn: !GetAtt WebhookQueue.Arn
+          batchSize: 10
+
+resources:
+  Resources:
+    # Single Table Design for DynamoDB
+    DispatchTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: dispatch-hq-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    # Reliable Webhook Queue
+    WebhookQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: dispatch-hq-webhooks-${sls:stage}
+        VisibilityTimeout: 60 # Lambda processing time limit
+        MessageRetentionPeriod: 345600 # 4 days
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt WebhookDLQ.Arn
+          maxReceiveCount: 3
+
+    WebhookDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: dispatch-hq-webhooks-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600 # 14 days
